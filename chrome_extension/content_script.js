@@ -1,7 +1,7 @@
 /**
  * Content Script
  *
- * 注入到 github.com/*/*（仓库页面）。
+ * 注入到 GitHub 仓库页面。
  * 负责：
  * 1. 识别当前 repo（owner/repo）
  * 2. 在页面右侧注入「生成大纲」按钮和结果面板
