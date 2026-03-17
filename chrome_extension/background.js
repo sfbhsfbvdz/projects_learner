@@ -49,13 +49,13 @@ async function handleAnalyze({ owner, repo }, tabId) {
 
   try {
     // 从 storage 读取 API Keys
-    const { anthropicKey, githubToken } = await chrome.storage.sync.get([
-      "anthropicKey",
+    const { deepseekKey, githubToken } = await chrome.storage.sync.get([
+      "deepseekKey",
       "githubToken",
     ]);
 
-    if (!anthropicKey) {
-      sendError("请先在插件设置中填写 Anthropic API Key");
+    if (!deepseekKey) {
+      sendError("请先在插件设置中填写 DeepSeek API Key");
       return;
     }
 
@@ -65,7 +65,7 @@ async function handleAnalyze({ owner, repo }, tabId) {
       owner,
       repo,
       systemPrompt: prompt,
-      anthropicKey,
+      deepseekKey,
       githubToken: githubToken || null,
       onProgress: sendProgress,
     });

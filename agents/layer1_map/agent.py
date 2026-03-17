@@ -1,7 +1,5 @@
 """
-layer1_map — 项目大纲生成 Agent（GitHub 版）
-
-输入一个 GitHub 仓库 URL，自动探索项目结构，输出帮助用户建立方向感的「项目大纲」。
+layer1_map — 项目大纲生成 Agent（DeepSeek 版）
 
 用法
 ----
@@ -13,8 +11,8 @@ import json
 import os
 import re
 import sys
-
-import anthropic
+import urllib.error
+import urllib.request
 
 from github_tools import find_files, list_directory, read_file
 
@@ -25,166 +23,142 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_HERE, "prompt.md"), encoding="utf-8") as _f:
     SYSTEM_PROMPT = _f.read()
 
-# ── 工具定义（提供给 Claude 的 JSON Schema）──────────────────────────────────
+# ── 工具定义（OpenAI 格式）────────────────────────────────────────────────────
 
 TOOLS = [
     {
-        "name": "list_directory",
-        "description": (
-            "列出 GitHub 仓库中某个目录的内容。"
-            "[DIR] 表示子目录，[FILE] 表示文件（附带大小）。"
-            "path 留空或传 '' 表示根目录。"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "目录路径，例如 '' 表示根目录，'src' 表示 src/ 目录",
-                }
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "列出 GitHub 仓库中某个目录的内容。[DIR] 表示子目录，[FILE] 表示文件。path 留空表示根目录。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "目录路径，留空表示根目录"},
+                },
+                "required": ["path"],
             },
-            "required": ["path"],
         },
     },
     {
-        "name": "read_file",
-        "description": (
-            "读取 GitHub 仓库中某个文件的文本内容。"
-            "适合读取 README、package.json、入口文件等关键文件。"
-            "大文件会自动截断，只返回前 max_lines 行。"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，例如 'README.md'、'src/index.ts'",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取 GitHub 仓库中某个文件的文本内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件路径，例如 README.md"},
+                    "max_lines": {"type": "integer", "description": "最多读取行数，默认 80"},
                 },
-                "max_lines": {
-                    "type": "integer",
-                    "description": "最多读取的行数，默认 80",
-                },
+                "required": ["path"],
             },
-            "required": ["path"],
         },
     },
     {
-        "name": "find_files",
-        "description": (
-            "在仓库中按 glob 模式搜索文件。"
-            "例如用 '*.py' 搜索所有 Python 文件，用 '*.ts' 搜索 TypeScript 文件。"
-            "搜索范围可以用 base_path 限制在某个子目录内。"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "glob 模式，例如 '*.py'、'*.json'、'*.ts'",
+        "type": "function",
+        "function": {
+            "name": "find_files",
+            "description": "在仓库中按 glob 模式搜索文件，例如 '*.py'、'*.ts'。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "glob 模式，例如 '*.py'"},
+                    "base_path": {"type": "string", "description": "限制搜索范围的子目录，留空表示整个仓库"},
                 },
-                "base_path": {
-                    "type": "string",
-                    "description": "限制搜索范围的子目录，留空表示搜索整个仓库",
-                },
+                "required": ["pattern", "base_path"],
             },
-            "required": ["pattern", "base_path"],
         },
     },
 ]
 
+# ── 调用 DeepSeek API ─────────────────────────────────────────────────────────
+
+DEEPSEEK_API = "https://api.deepseek.com/chat/completions"
+
+def call_deepseek(messages: list, api_key: str) -> dict:
+    payload = json.dumps({
+        "model": "deepseek-chat",
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+        "tools": TOOLS,
+        "tool_choice": "auto",
+    }).encode()
+
+    req = urllib.request.Request(
+        DEEPSEEK_API,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"DeepSeek API 错误 {e.code}: {body}")
+
+# ── 工具执行 ──────────────────────────────────────────────────────────────────
+
+def run_tool(name: str, args: dict, owner: str, repo: str, token: str | None) -> str:
+    if name == "list_directory":
+        return list_directory(owner, repo, args.get("path", ""), token)
+    if name == "read_file":
+        return read_file(owner, repo, args["path"], args.get("max_lines", 80), token)
+    if name == "find_files":
+        return find_files(owner, repo, args["pattern"], args.get("base_path", ""), token)
+    return f"[错误] 未知工具：{name}"
+
 # ── GitHub URL 解析 ───────────────────────────────────────────────────────────
 
 def parse_github_url(url: str) -> tuple[str, str]:
-    """从 GitHub URL 中提取 owner 和 repo。"""
-    url = url.rstrip("/")
-    # 匹配 https://github.com/owner/repo 或 github.com/owner/repo
     match = re.search(r"github\.com/([^/]+)/([^/]+)", url)
     if not match:
         raise ValueError(f"无法解析 GitHub URL：{url}")
-    owner, repo = match.group(1), match.group(2)
-    # 去掉 .git 后缀
-    repo = repo.removesuffix(".git")
-    return owner, repo
-
-# ── 工具执行（把 Claude 的调用转发到 github_tools）──────────────────────────
-
-def run_tool(name: str, inp: dict, owner: str, repo: str, token: str | None) -> str:
-    if name == "list_directory":
-        return list_directory(owner, repo, inp.get("path", ""), token)
-    if name == "read_file":
-        return read_file(owner, repo, inp["path"], inp.get("max_lines", 80), token)
-    if name == "find_files":
-        return find_files(owner, repo, inp["pattern"], inp.get("base_path", ""), token)
-    return f"[错误] 未知工具：{name}"
+    return match.group(1), match.group(2).removesuffix(".git")
 
 # ── Agent 主循环 ──────────────────────────────────────────────────────────────
 
-def run(github_url: str, token: str | None = None) -> str:
-    """
-    对 GitHub 仓库运行 Layer 1 大纲生成 Agent。
-    返回 Markdown 格式的项目大纲。
-    """
+def run(github_url: str, api_key: str, github_token: str | None = None) -> str:
     owner, repo = parse_github_url(github_url)
-    client = anthropic.Anthropic()
-
     messages = [
         {
             "role": "user",
-            "content": (
-                f"请为这个 GitHub 仓库生成项目大纲。\n\n"
-                f"仓库：{owner}/{repo}\n"
-                f"地址：{github_url}\n\n"
-                f"先从列出根目录开始。"
-            ),
+            "content": f"请为这个 GitHub 仓库生成项目大纲。\n\n仓库：{owner}/{repo}\n\n先从列出根目录开始。",
         }
     ]
 
     print(f"▶ 开始分析：{owner}/{repo}\n", file=sys.stderr)
 
     while True:
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            thinking={"type": "adaptive"},
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-        )
+        response = call_deepseek(messages, api_key)
+        choice = response["choices"][0]
+        message = choice["message"]
 
-        # 打印工具调用（调试用）
-        for block in response.content:
-            if block.type == "tool_use":
-                args = json.dumps(block.input, ensure_ascii=False)
-                print(f"  [tool] {block.name}({args})", file=sys.stderr)
+        # 追加 assistant 消息
+        messages.append(message)
 
-        # Claude 完成，提取最终文本
-        if response.stop_reason == "end_turn":
-            for block in response.content:
-                if block.type == "text":
-                    return block.text
-            return ""
+        # 完成
+        if choice["finish_reason"] == "stop":
+            return message.get("content", "")
 
-        if response.stop_reason != "tool_use":
-            print(f"[警告] 意外的 stop_reason: {response.stop_reason}", file=sys.stderr)
-            break
+        # 执行工具调用
+        if choice["finish_reason"] == "tool_calls":
+            for call in message.get("tool_calls", []):
+                name = call["function"]["name"]
+                args = json.loads(call["function"]["arguments"])
+                print(f"  [tool] {name}({json.dumps(args, ensure_ascii=False)})", file=sys.stderr)
 
-        # 把 assistant 回复追加到历史
-        messages.append({"role": "assistant", "content": response.content})
+                result = run_tool(name, args, owner, repo, github_token)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": result,
+                })
+            continue
 
-        # 执行所有工具，收集结果
-        tool_results = [
-            {
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": run_tool(block.name, block.input, owner, repo, token),
-            }
-            for block in response.content
-            if block.type == "tool_use"
-        ]
-
-        messages.append({"role": "user", "content": tool_results})
-
-    return ""
+        raise RuntimeError(f"意外的 finish_reason: {choice['finish_reason']}")
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -192,8 +166,13 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="生成 GitHub 仓库的学习大纲")
-    parser.add_argument("url", help="GitHub 仓库 URL，例如 https://github.com/fastapi/fastapi")
-    parser.add_argument("--token", default=None, help="GitHub Personal Access Token（可选，提升速率限制）")
+    parser.add_argument("url", help="GitHub 仓库 URL")
+    parser.add_argument("--token", default=None, help="GitHub Token（可选）")
     args = parser.parse_args()
 
-    print(run(args.url, args.token))
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        print("请设置环境变量 DEEPSEEK_API_KEY", file=sys.stderr)
+        sys.exit(1)
+
+    print(run(args.url, api_key, args.token))
