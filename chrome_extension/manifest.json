@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Repo Learner",
+  "version": "0.1.0",
+  "description": "帮你逐层读懂 GitHub 开源项目",
+
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://api.github.com/*",
+    "https://api.anthropic.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*/*"],
+      "js": ["content_script.js"],
+      "css": ["content_script.css"]
+    }
+  ],
+
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  },
+
+  "action": {
+    "default_title": "Repo Learner",
+    "default_icon": "icons/icon48.png"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["agent/prompt.md"],
+      "matches": ["https://github.com/*"]
+    }
+  ]
+}
