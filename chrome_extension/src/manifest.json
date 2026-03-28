@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "description": "帮你逐层读懂 GitHub 开源项目",
 
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "tabs"],
 
   "host_permissions": [
     "https://api.github.com/*",
-    "https://api.deepseek.com/*"
+    "https://api.deepseek.com/*",
+    "https://github.com/*"
   ],
 
   "background": {
