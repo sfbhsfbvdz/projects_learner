@@ -63,30 +63,34 @@ const TOOLS = [
 
 async function callDeepSeek(messages, systemPrompt, apiKey, { withTools = true, timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let resp;
-  try {
-    resp = await fetch(DEEPSEEK_API, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        max_tokens: 4096,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
-        ...(withTools ? { tools: TOOLS, tool_choice: "auto" } : {}),
-      }),
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  const fetchPromise = fetch(DEEPSEEK_API, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      max_tokens: 4096,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...messages,
+      ],
+      ...(withTools ? { tools: TOOLS, tool_choice: "auto" } : {}),
+    }),
+  });
+
+  // 用 Promise.race 实现超时，避免 MV3 service worker 的 setTimeout 不可靠问题
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => {
+      controller.abort();
+      reject(new Error(`请求超时（${timeoutMs / 1000}s），请重试`));
+    }, timeoutMs)
+  );
+
+  const resp = await Promise.race([fetchPromise, timeoutPromise]);
 
   if (!resp.ok) {
     const body = await resp.text();
@@ -226,10 +230,10 @@ export async function run({ owner, repo, systemPrompt, deepseekKey, githubToken 
   messages.push({
     role: "user",
     content: isEn
-      ? "Good, information collected. Now output the complete project outline in the Markdown format specified in the system prompt. Do not call any more tools."
-      : "好的，信息已经收集完毕。请现在按照系统提示中规定的 Markdown 格式，直接输出完整的项目大纲，不要再调用工具。",
+      ? "Information collected. Now output the full response as specified in the system prompt — including the human-readable outline AND the <structured-data> JSON block at the end. Output everything in one response, no more tool calls."
+      : "信息已收集完毕。请现在按照系统提示的格式，一次性输出完整内容：包括人类可读的大纲部分，以及末尾的 <structured-data> JSON 数据块。不要再调用工具。",
   });
-  const final = await callDeepSeek(messages, systemPrompt, deepseekKey, { withTools: false, timeoutMs: 90_000 });
+  const final = await callDeepSeek(messages, systemPrompt, deepseekKey, { withTools: false, timeoutMs: 60_000 });
   const finalContent = final.choices[0].message.content ?? "";
   if (finalContent.trim()) return finalContent;
 

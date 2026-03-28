@@ -84,6 +84,8 @@ export function Panel({ owner, repo }: PanelProps) {
   const [logs, setLogs] = useState<string[]>([]);
   const [outline, setOutline] = useState(_saved?.outline ?? "");
   const [error, setError] = useState(_saved?.error ?? "");
+  const [loadingSeconds, setLoadingSeconds] = useState(0);
+  const loadingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Socratic chat state ────────────────────────────────────────────────────
   const [chatPhase, setChatPhase] = useState<ChatPhase>(_saved?.chatPhase ?? "idle");
@@ -205,6 +207,7 @@ export function Panel({ owner, repo }: PanelProps) {
   const handleAnalyze = () => {
     setStatus("loading");
     setLogs([]);
+    setLoadingSeconds(0);
     setOutline("");
     setDisplayOutline("");
     setStructuredData(null);
@@ -214,6 +217,34 @@ export function Panel({ owner, repo }: PanelProps) {
     setActiveTab("1");
     chrome.runtime.sendMessage({ action: "analyze", owner, repo, lang });
   };
+
+  // 计时器：loading 期间每秒 +1，超过 90s 强制显示超时错误
+  useEffect(() => {
+    if (status === "loading") {
+      loadingTimerRef.current = setInterval(() => {
+        setLoadingSeconds((s) => {
+          if (s >= 90) {
+            clearInterval(loadingTimerRef.current!);
+            setStatus("error");
+            setError(lang === "en"
+              ? "Request timed out. DeepSeek may be slow — please retry."
+              : "请求超时，DeepSeek 响应过慢，请重试。");
+            return s;
+          }
+          return s + 1;
+        });
+      }, 1000);
+    } else {
+      if (loadingTimerRef.current) {
+        clearInterval(loadingTimerRef.current);
+        loadingTimerRef.current = null;
+      }
+      if (status !== "loading") setLoadingSeconds(0);
+    }
+    return () => {
+      if (loadingTimerRef.current) clearInterval(loadingTimerRef.current);
+    };
+  }, [status, lang]);
 
   // ── Socratic handlers ────────────────────────────────────────────────────
 
@@ -455,6 +486,11 @@ export function Panel({ owner, repo }: PanelProps) {
                       {logs.length > 0 && (
                         <p className="mt-1 text-xs font-mono truncate max-w-full" style={{ color: "#8b949e" }}>
                           {logs[logs.length - 1]}
+                        </p>
+                      )}
+                      {loadingSeconds > 0 && (
+                        <p className="mt-1 text-xs" style={{ color: loadingSeconds > 60 ? "#d29922" : "#6e7681" }}>
+                          {loadingSeconds}s{loadingSeconds >= 20 ? (lang === "en" ? " — generating outline, please wait…" : " — 生成大纲中，请稍候…") : ""}
                         </p>
                       )}
                     </div>
