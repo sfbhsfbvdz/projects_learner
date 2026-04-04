@@ -14,3 +14,43 @@
 | Layer 4：复述与迁移层 | 把理解转化为能讲、能用 | `agents/layer4_recite` |
 
 Layer 1 生成项目大纲作为起点。Layer 2-4 用苏格拉底式问答逐层深入，每层结束后用户可以自主选择是否继续。
+
+## 当前实现
+
+- `chrome_extension/`：主产品形态，Chrome 扩展实现
+- `agents/layer1_map/`：Python 版仓库分析原型
+- `agents/layer2_trunk/`、`agents/layer3_deep/`、`agents/layer4_recite/`：分层引导 prompt
+
+## 开发
+
+Chrome 扩展：
+
+```bash
+cd chrome_extension
+npm install
+npm run dev
+```
+
+构建产物输出到 `chrome_extension/dist/`。
+
+## 校验
+
+扩展类型检查：
+
+```bash
+cd chrome_extension
+npm run typecheck
+```
+
+扩展完整校验：
+
+```bash
+cd chrome_extension
+npm run check
+```
+
+仓库级基础校验：
+
+```bash
+make check
+```

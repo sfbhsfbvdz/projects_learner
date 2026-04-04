@@ -28,12 +28,12 @@ const fileCache = new Map<string, string>();
 
 // ── 消息处理 ──────────────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: any, sender: any, sendResponse: (response: unknown) => void) => {
   if (message.action === "analyze") {
-    handleAnalyze(message, sender.tab.id);
+    handleAnalyze(message, sender.tab?.id);
     sendResponse({ status: "started" });
   } else if (message.action === "learn") {
-    handleLearn(message, sender.tab.id);
+    handleLearn(message, sender.tab?.id);
     sendResponse({ status: "started" });
   } else if (message.action === "find_lines") {
     const { owner, repo, path, codeText } = message;
@@ -80,15 +80,20 @@ function findLinesInFile(codeLines: string[], fileContent: string): { start: num
  * message.phase: "probe" | "explore" | "verify"
  * message.messages: 完整对话历史（含结构化数据作为第一条 user 消息）
  */
-async function handleLearn({ owner, repo, lang = "zh", phase, messages }, tabId) {
+async function handleLearn(
+  { owner, repo, lang = "zh", phase, messages, requestId }: { owner: string; repo: string; lang?: string; phase: string; messages: any[]; requestId: string },
+  tabId?: number
+) {
+  if (tabId == null) return;
+
   function sendProgress(text: string) {
-    chrome.tabs.sendMessage(tabId, { action: "learn_progress", text });
+    chrome.tabs.sendMessage(tabId, { action: "learn_progress", text, requestId, owner, repo, phase });
   }
   function sendResponse(content: string, nextPhase: string | null) {
-    chrome.tabs.sendMessage(tabId, { action: "learn_response", content, nextPhase });
+    chrome.tabs.sendMessage(tabId, { action: "learn_response", content, nextPhase, requestId, owner, repo, phase });
   }
   function sendError(error: string) {
-    chrome.tabs.sendMessage(tabId, { action: "learn_error", error });
+    chrome.tabs.sendMessage(tabId, { action: "learn_error", error, requestId, owner, repo, phase });
   }
 
   try {
@@ -141,18 +146,23 @@ async function handleLearn({ owner, repo, lang = "zh", phase, messages }, tabId)
   }
 }
 
-async function handleAnalyze({ owner, repo, lang = "en" }, tabId) {
+async function handleAnalyze(
+  { owner, repo, lang = "en", requestId }: { owner: string; repo: string; lang?: string; requestId: string },
+  tabId?: number
+) {
+  if (tabId == null) return;
+
   // 发送进度消息给 content_script
-  function sendProgress(text) {
-    chrome.tabs.sendMessage(tabId, { action: "progress", text });
+  function sendProgress(text: string) {
+    chrome.tabs.sendMessage(tabId, { action: "progress", text, requestId, owner, repo });
   }
 
-  function sendResult(outline) {
-    chrome.tabs.sendMessage(tabId, { action: "result", outline });
+  function sendResult(outline: string) {
+    chrome.tabs.sendMessage(tabId, { action: "result", outline, requestId, owner, repo });
   }
 
-  function sendError(error) {
-    chrome.tabs.sendMessage(tabId, { action: "error", error });
+  function sendError(error: string) {
+    chrome.tabs.sendMessage(tabId, { action: "error", error, requestId, owner, repo });
   }
 
   try {
@@ -183,6 +193,6 @@ async function handleAnalyze({ owner, repo, lang = "en" }, tabId) {
 
     sendResult(outline);
   } catch (e) {
-    sendError(e.message ?? "未知错误");
+    sendError(e instanceof Error ? e.message : "未知错误");
   }
 }

@@ -6,6 +6,31 @@ type Status = "idle" | "loading" | "done" | "error";
 type Lang = "en" | "zh";
 type ChatPhase = "idle" | "probe" | "explore" | "verify" | "done";
 interface ChatMsg { role: "assistant" | "user"; content: string; }
+interface StructuredModule {
+  id: string;
+  name: string;
+  role: string;
+  priority: number;
+  primary_file: string;
+  probe_question: string;
+}
+interface MainFlowStep {
+  step: string;
+  file: string;
+}
+interface KeyDecision {
+  topic: string;
+  chosen: string;
+  alternative: string;
+  probe_question: string;
+}
+interface StructuredData {
+  project_summary: string;
+  tech_stack: string[];
+  modules: StructuredModule[];
+  main_flow: MainFlowStep[];
+  key_decisions: KeyDecision[];
+}
 
 const T = {
   en: {
@@ -58,15 +83,76 @@ const T = {
   },
 } as const;
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
+function parseStructuredData(raw: string): StructuredData | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StructuredData>;
+    if (!isNonEmptyString(parsed.project_summary)) return null;
+    if (!isStringArray(parsed.tech_stack)) return null;
+    if (!Array.isArray(parsed.modules) || parsed.modules.length === 0) return null;
+    if (!Array.isArray(parsed.main_flow) || parsed.main_flow.length === 0) return null;
+    if (!Array.isArray(parsed.key_decisions) || parsed.key_decisions.length === 0) return null;
+
+    const modules = parsed.modules
+      .filter((mod): mod is StructuredModule =>
+        !!mod &&
+        isNonEmptyString(mod.id) &&
+        isNonEmptyString(mod.name) &&
+        isNonEmptyString(mod.role) &&
+        typeof mod.priority === "number" &&
+        Number.isInteger(mod.priority) &&
+        isNonEmptyString(mod.primary_file) &&
+        isNonEmptyString(mod.probe_question)
+      )
+      .sort((a, b) => a.priority - b.priority);
+    if (modules.length !== parsed.modules.length) return null;
+    if (new Set(modules.map((mod) => mod.priority)).size !== modules.length) return null;
+
+    const mainFlow = parsed.main_flow.filter((step): step is MainFlowStep =>
+      !!step && isNonEmptyString(step.step) && isNonEmptyString(step.file)
+    );
+    if (mainFlow.length !== parsed.main_flow.length) return null;
+
+    const keyDecisions = parsed.key_decisions.filter((decision): decision is KeyDecision =>
+      !!decision &&
+      isNonEmptyString(decision.topic) &&
+      isNonEmptyString(decision.chosen) &&
+      isNonEmptyString(decision.alternative) &&
+      isNonEmptyString(decision.probe_question)
+    );
+    if (keyDecisions.length !== parsed.key_decisions.length) return null;
+
+    return {
+      project_summary: parsed.project_summary,
+      tech_stack: parsed.tech_stack,
+      modules,
+      main_flow: mainFlow,
+      key_decisions: keyDecisions,
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface PanelProps {
   owner: string;
   repo: string;
 }
 
 export function Panel({ owner, repo }: PanelProps) {
+  const nextRequestId = () =>
+    `${owner}/${repo}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
   // ── Persistent state across GitHub Turbo navigation ───────────────────────
   const stateKey = `repo_learner_${owner}_${repo}`;
-  const [_saved] = useState<Record<string, any> | null>(() => {
+  const [_saved] = useState<any | null>(() => {
     try {
       const raw = sessionStorage.getItem(stateKey);
       if (raw) return JSON.parse(raw);
@@ -86,13 +172,17 @@ export function Panel({ owner, repo }: PanelProps) {
   const [error, setError] = useState(_saved?.error ?? "");
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const loadingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analyzeRequestIdRef = useRef<string | null>(null);
+  const learnRequestIdRef = useRef<string | null>(null);
 
   // ── Socratic chat state ────────────────────────────────────────────────────
   const [chatPhase, setChatPhase] = useState<ChatPhase>(_saved?.chatPhase ?? "idle");
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>(_saved?.chatMessages ?? []);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-  const [structuredData, setStructuredData] = useState<any>(_saved?.structuredData ?? null);
+  const [structuredData, setStructuredData] = useState<StructuredData | null>(
+    parseStructuredData(JSON.stringify(_saved?.structuredData ?? null))
+  );
   const [displayOutline, setDisplayOutline] = useState<string>(_saved?.displayOutline ?? "");
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
@@ -205,6 +295,9 @@ export function Panel({ owner, repo }: PanelProps) {
   }, [open, minimized, lang, status, activeTab, outline, error, pos, panelSize, chatPhase, chatMessages, structuredData, displayOutline]);
 
   const handleAnalyze = () => {
+    const requestId = nextRequestId();
+    analyzeRequestIdRef.current = requestId;
+    learnRequestIdRef.current = null;
     setStatus("loading");
     setLogs([]);
     setLoadingSeconds(0);
@@ -215,7 +308,7 @@ export function Panel({ owner, repo }: PanelProps) {
     setChatMessages([]);
     setError("");
     setActiveTab("1");
-    chrome.runtime.sendMessage({ action: "analyze", owner, repo, lang });
+    chrome.runtime.sendMessage({ action: "analyze", owner, repo, lang, requestId });
   };
 
   // 计时器：loading 期间每秒 +1，超过 90s 强制显示超时错误
@@ -239,7 +332,7 @@ export function Panel({ owner, repo }: PanelProps) {
         clearInterval(loadingTimerRef.current);
         loadingTimerRef.current = null;
       }
-      if (status !== "loading") setLoadingSeconds(0);
+      setLoadingSeconds(0);
     }
     return () => {
       if (loadingTimerRef.current) clearInterval(loadingTimerRef.current);
@@ -250,6 +343,8 @@ export function Panel({ owner, repo }: PanelProps) {
 
   const handleStartLearning = () => {
     if (!structuredData) return;
+    const requestId = nextRequestId();
+    learnRequestIdRef.current = requestId;
     const prompt = lang === "en"
       ? `Project structured data:\n\`\`\`json\n${JSON.stringify(structuredData, null, 2)}\n\`\`\`\n\nPlease start the guided session based on the above data.`
       : `项目结构化数据：\n\`\`\`json\n${JSON.stringify(structuredData, null, 2)}\n\`\`\`\n\n请基于以上数据开始引导。`;
@@ -259,18 +354,20 @@ export function Panel({ owner, repo }: PanelProps) {
     setChatPhase("probe");
     setChatLoading(true);
     setActiveTab("2");
-    chrome.runtime.sendMessage({ action: "learn", owner, repo, lang, phase: "probe", messages: newMessages });
+    chrome.runtime.sendMessage({ action: "learn", owner, repo, lang, phase: "probe", messages: newMessages, requestId });
   };
 
   const handleSendChat = () => {
     const text = chatInput.trim();
     if (!text || chatLoading || chatPhase === "done") return;
+    const requestId = nextRequestId();
+    learnRequestIdRef.current = requestId;
     const userMsg: ChatMsg = { role: "user", content: text };
     const newMessages = [...chatMessages, userMsg];
     setChatMessages(newMessages);
     setChatInput("");
     setChatLoading(true);
-    chrome.runtime.sendMessage({ action: "learn", owner, repo, lang, phase: chatPhase, messages: newMessages });
+    chrome.runtime.sendMessage({ action: "learn", owner, repo, lang, phase: chatPhase, messages: newMessages, requestId });
   };
 
   // scroll to bottom when new chat messages arrive
@@ -280,16 +377,19 @@ export function Panel({ owner, repo }: PanelProps) {
 
   useEffect(() => {
     const listener = (msg: any) => {
+      const isCurrentRepo = msg.owner === owner && msg.repo === repo;
       if (msg.action === "progress") {
+        if (!isCurrentRepo || msg.requestId !== analyzeRequestIdRef.current) return;
         setLogs((prev) => [...prev, msg.text]);
       } else if (msg.action === "result") {
+        if (!isCurrentRepo || msg.requestId !== analyzeRequestIdRef.current) return;
         setStatus("done");
         const raw: string = msg.outline ?? "";
         // Parse out <structured-data> block
         const sdMatch = raw.match(/<structured-data>([\s\S]*?)<\/structured-data>/);
         if (sdMatch) {
           try {
-            const parsed = JSON.parse(sdMatch[1].trim());
+            const parsed = parseStructuredData(sdMatch[1].trim());
             setStructuredData(parsed);
           } catch {}
           const clean = raw.replace(/<structured-data>[\s\S]*?<\/structured-data>/, "").trim();
@@ -300,9 +400,11 @@ export function Panel({ owner, repo }: PanelProps) {
           setDisplayOutline(raw);
         }
       } else if (msg.action === "error") {
+        if (!isCurrentRepo || msg.requestId !== analyzeRequestIdRef.current) return;
         setStatus("error");
         setError(msg.error);
       } else if (msg.action === "learn_response") {
+        if (!isCurrentRepo || msg.requestId !== learnRequestIdRef.current) return;
         const assistantMsg: ChatMsg = { role: "assistant", content: msg.content };
         setChatMessages((prev) => [...prev, assistantMsg]);
         setChatLoading(false);
@@ -310,6 +412,7 @@ export function Panel({ owner, repo }: PanelProps) {
           setChatPhase(msg.nextPhase as ChatPhase);
         }
       } else if (msg.action === "learn_error") {
+        if (!isCurrentRepo || msg.requestId !== learnRequestIdRef.current) return;
         setChatLoading(false);
         const errMsg: ChatMsg = { role: "assistant", content: `⚠️ ${msg.error}` };
         setChatMessages((prev) => [...prev, errMsg]);
@@ -347,10 +450,16 @@ export function Panel({ owner, repo }: PanelProps) {
     );
   }
 
+  // Prevent all keyboard events from leaking to the host page (e.g. GitHub shortcuts)
+  const stopKeys = (e: React.KeyboardEvent) => e.stopPropagation();
+
   return (
     <div
       ref={panelRef}
       className="fixed z-[9999]"
+      onKeyDown={stopKeys}
+      onKeyUp={stopKeys}
+      onKeyPress={stopKeys}
       style={{
         left: pos.x,
         top: pos.y,
@@ -572,6 +681,7 @@ export function Panel({ owner, repo }: PanelProps) {
                 lang={lang}
                 owner={owner}
                 repo={repo}
+                structuredData={structuredData}
               />
             )}
           </div>
@@ -1008,9 +1118,55 @@ function TechStackBar({ outline, lang }: { outline: string; lang: Lang }) {
   );
 }
 
+// ── Chat Markdown renderer (for conversational agent responses) ───────────────
+
+function ChatMarkdown({ content, lang, owner, repo }: { content: string; lang: Lang; owner: string; repo: string }) {
+  // If content has ## sections, delegate to Outline (Agent 3/4 might output structured content)
+  if (/^## /m.test(content)) {
+    return <Outline markdown={content} lang={lang} owner={owner} repo={repo} />;
+  }
+  // Otherwise render as conversational markdown: paragraphs, bold, inline code, lists, fenced code
+  const lines = content.split("\n");
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Fenced code block
+    const fenceMatch = line.match(/^```(\w*)$/);
+    if (fenceMatch) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++;
+      elements.push(
+        <pre key={i} className="rounded-lg px-4 py-3 text-xs font-mono leading-6 overflow-x-auto whitespace-pre my-1" style={{ background: "#161b22", border: "1px solid #30363d", color: "#e6edf3" }}>
+          {codeLines.join("\n")}
+        </pre>
+      );
+      continue;
+    }
+    // Blank line
+    if (line.trim() === "") { i++; continue; }
+    // Collect paragraph / list lines
+    const block: string[] = [];
+    while (i < lines.length && lines[i].trim() !== "" && !lines[i].match(/^```/)) {
+      block.push(lines[i]);
+      i++;
+    }
+    const html = renderInline(block.join("\n"));
+    if (html) elements.push(
+      <div key={i} className="text-xs leading-6" style={{ color: "#e6edf3" }} dangerouslySetInnerHTML={{ __html: html }} />
+    );
+  }
+  return <div className="flex flex-col gap-2 px-1 py-1">{elements}</div>;
+}
+
 // ── Socratic Chat ─────────────────────────────────────────────────────────────
 
-function PhaseBar({ phase, t }: { phase: ChatPhase; t: typeof T["en"] }) {
+function PhaseBar({ phase, t }: { phase: ChatPhase; t: (typeof T)[keyof typeof T] }) {
   const phases: ChatPhase[] = ["probe", "explore", "verify", "done"];
   const activeIdx = phases.indexOf(phase);
   return (
@@ -1043,7 +1199,7 @@ function PhaseBar({ phase, t }: { phase: ChatPhase; t: typeof T["en"] }) {
 }
 
 function SocraticChat({
-  phase, messages, loading, input, onInput, onSend, bottomRef, t, lang, owner, repo,
+  phase, messages, loading, input, onInput, onSend, bottomRef, t, lang, owner, repo, structuredData,
 }: {
   phase: ChatPhase;
   messages: ChatMsg[];
@@ -1052,17 +1208,106 @@ function SocraticChat({
   onInput: (v: string) => void;
   onSend: () => void;
   bottomRef: React.RefObject<HTMLDivElement>;
-  t: typeof T["en"];
+  t: (typeof T)[keyof typeof T];
   lang: Lang;
   owner: string;
   repo: string;
+  structuredData: StructuredData | null;
 }) {
+  const [pathOpen, setPathOpen] = useState(true);
+
   // Only show user messages (not the hidden structured-data message)
-  const visibleMessages = messages.filter((m, i) => !(i === 0 && m.role === "user" && m.content.startsWith("项目结构化数据：")));
+  const visibleMessages = messages.filter((m, i) => !(i === 0 && m.role === "user" && (m.content.startsWith("项目结构化数据：") || m.content.startsWith("Project structured data:"))));
+
+  // Collect all <!-- FILE: path --> signals seen so far (last one = current file)
+  const mentionedFiles: string[] = [];
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      const matches = [...msg.content.matchAll(/<!--\s*FILE:\s*(.+?)\s*-->/g)];
+      for (const m of matches) mentionedFiles.push(m[1].trim());
+    }
+  }
+  const currentFile = mentionedFiles[mentionedFiles.length - 1] ?? null;
+
+  const modules = structuredData?.modules ?? [];
 
   return (
     <div className="flex flex-col h-full min-h-0">
       <PhaseBar phase={phase} t={t} />
+
+      {/* ── Learning Path panel ── */}
+      {modules.length > 0 && (
+        <div className="shrink-0" style={{ borderBottom: "1px solid #30363d", background: "#0d1117" }}>
+          <button
+            onClick={() => setPathOpen(v => !v)}
+            className="flex w-full items-center justify-between px-4 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors hover:bg-[#161b22]"
+            style={{ color: "#6e7681" }}
+          >
+            <span>{lang === "en" ? "Learning Path" : "学习路径"}</span>
+            {pathOpen ? <ChevronUp size={10} style={{ color: "#6e7681" }} /> : <ChevronDown size={10} style={{ color: "#6e7681" }} />}
+          </button>
+          {pathOpen && (
+            <div className="flex flex-col gap-0 pb-2">
+              {modules.map((mod, i) => {
+                const visited = mentionedFiles.includes(mod.primary_file);
+                const active = currentFile === mod.primary_file;
+                return (
+                  <div
+                    key={mod.id ?? i}
+                    className="flex items-start gap-2 px-4 py-1"
+                    style={{ background: active ? "#1c2d3f" : "transparent" }}
+                  >
+                    <span
+                      className="mt-0.5 h-3.5 w-3.5 shrink-0 flex items-center justify-center rounded-full text-[9px] font-bold"
+                      style={{
+                        background: visited ? "#2ea043" : active ? "#58a6ff" : "#21262d",
+                        color: visited || active ? "#fff" : "#6e7681",
+                        border: active ? "1px solid #388bfd" : "1px solid transparent",
+                      }}
+                    >
+                      {visited ? "✓" : i + 1}
+                    </span>
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-[11px] font-medium leading-tight" style={{ color: active ? "#79c0ff" : visited ? "#3fb950" : "#e6edf3" }}>
+                        {mod.name}
+                      </span>
+                      <a
+                        href={`https://github.com/${owner}/${repo}/blob/HEAD/${mod.primary_file}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] font-mono truncate hover:underline"
+                        style={{ color: "#6e7681", maxWidth: 260 }}
+                        title={mod.primary_file}
+                      >
+                        {mod.primary_file}
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Current file badge */}
+      {currentFile && phase === "explore" && (
+        <div
+          className="flex items-center gap-1.5 shrink-0 px-4 py-1.5"
+          style={{ borderBottom: "1px solid #30363d", background: "#161b22" }}
+        >
+          <span className="text-[10px]" style={{ color: "#6e7681" }}>{lang === "en" ? "Now reading:" : "正在看："}</span>
+          <a
+            href={`https://github.com/${owner}/${repo}/blob/HEAD/${currentFile}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] font-mono hover:underline"
+            style={{ color: "#58a6ff" }}
+          >
+            {currentFile}
+          </a>
+        </div>
+      )}
 
       {/* Message list */}
       <div className="flex-1 overflow-y-auto min-h-0 px-4 py-3 flex flex-col gap-3">
@@ -1070,7 +1315,12 @@ function SocraticChat({
           <div key={i} className={`flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
             {msg.role === "assistant" ? (
               <div className="w-full">
-                <Outline markdown={msg.content} lang={lang} owner={owner} repo={repo} />
+                <ChatMarkdown
+                  content={msg.content.replace(/<!--\s*FILE:\s*.+?\s*-->/g, "").trim()}
+                  lang={lang}
+                  owner={owner}
+                  repo={repo}
+                />
               </div>
             ) : (
               <div

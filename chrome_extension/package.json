@@ -2,9 +2,12 @@
   "name": "repo-learner",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite build --watch",
-    "build": "vite build"
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "react": "^18.3.1",

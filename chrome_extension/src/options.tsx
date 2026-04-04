@@ -9,7 +9,7 @@ function Options() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    chrome.storage.sync.get(["deepseekKey", "githubToken"], (data) => {
+    chrome.storage.sync.get(["deepseekKey", "githubToken"], (data: { deepseekKey?: string; githubToken?: string }) => {
       if (data.deepseekKey) setDeepseekKey(data.deepseekKey);
       if (data.githubToken) setGithubToken(data.githubToken);
     });
